@@ -9,16 +9,14 @@
  * .xlsx files (Microsoft Excel 2007 and newer) are basically zipped archives
  * of .xml files which holds different content. If you unzip a .xlsx file you
  * will get a lot of files, among them a xl folder containing
- * sharedStrings.xml, worksheets and styles. The sharedStrings.xml file is the
- * one we manipulated with this library.
+ * sharedStrings.xml, worksheets and styles.
  *
  * Functions of the library:
  *
  * * close - Resets the class for a new run.
  * * load - Loads a .xlsx file into memory and unzips it.
+ * * replace - Does a global search and replace with the given values.
  * * save - Saves the temporary buffer to disk.
- * * setValue - Does a global search and replace with the given values.
- * * setValues - Does a global search and replace with an array of values.
  */
 
 /**
@@ -32,13 +30,12 @@ define('XLSX_BASE_PATH', dirname(__FILE__) . '/');
  * The DOCx class.
  */
 class XLSx {
-  private $_filename         = NULL;
-  private $_filepath         = NULL;
-  private $_tempFilename     = NULL;
-  private $_tempFilepath     = NULL;
-  private $_zipArchive       = NULL;
-  private $_sharedStrings    = array();
-  private $_sharedStringsXML = NULL;
+  private $_entries      = array();
+  private $_filename     = NULL;
+  private $_filepath     = NULL;
+  private $_tempFilename = NULL;
+  private $_tempFilepath = NULL;
+  private $_zipArchive   = NULL;
 
   /**
    * Initiate a new instance of the XLSx class.
@@ -56,6 +53,7 @@ class XLSx {
    * Resets the class for a new run.
    */
   public function close() {
+    $this->_entries = array();
     $this->_filename = NULL;
     $this->_filepath = NULL;
     $this->_tempFilename = NULL;
@@ -66,22 +64,22 @@ class XLSx {
   /**
    * Compiles a fresh XML document from entries.
    *
-   * @param array $entries
-   *   The entries to compile from.
+   * @param array $lines
+   *   The lines to compile from.
    *
    * @return string
    *   Newly formed XML.
    */
-  private function compileXML($xml) {
+  private function compileXML($lines) {
     $output = '';
 
-    if (count($this->_sharedStrings)) {
-      foreach ($this->_sharedStrings as $string) {
-        if (strpos($string, '>') !== FALSE) {
+    if (count($lines)) {
+      foreach ($lines as $line) {
+        if (strpos($line, '>') !== FALSE) {
           $output .= '<';
         }
 
-        $output .= $string;
+        $output .= $line;
       }
     }
 
@@ -98,7 +96,7 @@ class XLSx {
     $this->_filename = (strpos($filepath, '/') !== FALSE ? substr($filepath, strrpos($filepath, '/') + 1) : $filepath);
     $this->_filepath = $filepath;
 
-    $this->_tempFilename = '.' . time() . '.temp.xlsx';
+    $this->_tempFilename = '.' . microtime(TRUE) . '.temp.xlsx';
     $this->_tempFilepath = XLSX_BASE_PATH . $this->_tempFilename;
 
     copy(
@@ -109,8 +107,54 @@ class XLSx {
     $this->_zipArchive = new ZipArchive();
     $this->_zipArchive->open($this->_tempFilepath);
 
-    $this->_sharedStringsXML = $this->_zipArchive->getFromName('xl/sharedStrings.xml');
-    $this->_sharedStrings = explode('<', $this->_sharedStringsXML);
+    for ($i = 0; $i < $this->_zipArchive->numFiles; $i++) {
+      $stat = $this->_zipArchive->statIndex($i);
+
+      if (substr($stat['name'], -4) == '.xml') {
+        $xml = $this->_zipArchive->getFromName($stat['name']);
+
+        if (!empty($xml)) {
+          $this->_entries[] = array(
+            'name'  => $stat['name'],
+            'lines' => explode('<', $xml),
+          );
+        }
+      }
+    }
+  }
+
+  /**
+   * Does a global search and replace with the given values.
+   *
+   * @param array $values
+   *   A list of search and replace values.
+   * @param bool $treatAsTags
+   *   Check if keys in the array is wrapped in ${}.
+   */
+  public function replace($values, $treatAsTags = FALSE) {
+    if (is_array($values) &&
+      count($values)) {
+      foreach ($values as $key => $value) {
+        if ($treatAsTags) {
+          if (strlen($key) > 1 && substr($key, 0, 2) !== '${') {
+            $key = '${' . $key;
+          }
+          if (strlen($key) > 1 && substr($key, -1) !== '}') {
+            $key .= '}';
+          }
+        }
+
+        if (count($this->_entries)) {
+          for ($i = 0; $i < count($this->_entries); $i++) {
+            if (count($this->_entries[$i]['lines'])) {
+              for ($j = 0; $j < count($this->_entries[$i]['lines']); $j++) {
+                $this->_entries[$i]['lines'][$j] = str_replace($key, $value, $this->_entries[$i]['lines'][$j]);
+              }
+            }
+          }
+        }
+      }
+    }
   }
 
   /**
@@ -123,7 +167,12 @@ class XLSx {
    *   The filepath of the save file.
    */
   public function save($filepath = NULL) {
-    $this->_zipArchive->addFromString('xl/sharedStrings.xml', $this->compileXML($this->_sharedStrings));
+    if (count($this->_entries)) {
+      for ($i = 0; $i < count($this->_entries); $i++) {
+        $this->_zipArchive->addFromString($this->_entries[$i]['name'], $this->compileXML($this->_entries[$i]['lines']));
+      }
+    }
+
     $this->_zipArchive->close();
 
     if ($filepath !== NULL) {
@@ -136,43 +185,6 @@ class XLSx {
     }
     else {
       return $this->_tempFilepath;
-    }
-  }
-
-  /**
-   * Does a global search and replace with the given values.
-   *
-   * @param string $search
-   *   The tag to search for, represented as ${TAGNAME} in the file.
-   * @param string $replace
-   *   The text to replace it with.
-   */
-  public function setValue($search, $replace) {
-    if (strlen($search) > 2 &&
-      substr($search, 0, 2) !== '${' &&
-      substr($search, -1) !== '}') {
-      $search = '${' . $search . '}';
-    }
-
-    if (count($this->_sharedStrings)) {
-      for ($i = 0; $i < count($this->_sharedStrings); $i++) {
-        $this->_sharedStrings[$i] = str_replace($search, $replace, $this->_sharedStrings[$i]);
-      }
-    }
-  }
-
-  /**
-   * Does a global search and replace with an array of values.
-   *
-   * @param array $values
-   *   A keyed array with search and replaces values.
-   */
-  public function setValues($values) {
-    if (is_array($values) &&
-      count($values)) {
-      foreach ($values as $key => $value) {
-        $this->setValue($key, $value);
-      }
     }
   }
 }
